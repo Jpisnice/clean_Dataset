@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import pyarrow as pa
 import pyarrow.parquet as pq
+import polars as pl
 from datasets import load_dataset, Audio
 import ray
 from audio_tools import AudioTableProcessor, binary_to_list_int8
@@ -221,20 +222,39 @@ def compute_dataset_statistics(dataset_path: str) -> Dict[str, Any]:
     
     # Find all parquet files
     parquet_files = list(dataset_path.rglob("*.parquet"))
-    
+
     for parquet_file in parquet_files:
-        table = pq.read_table(parquet_file)
-        
+        # Use Polars for robust reading and automatic dtype handling.
+        try:
+            df = pl.read_parquet(parquet_file)
+        except Exception as e:
+            print(f"❌ Failed to read {parquet_file}: {e}")
+            continue
+
         # Extract metadata from path
         parts = parquet_file.parts
         corpus = next(p.split('=')[1] for p in parts if p.startswith('corpus='))
         split = next(p.split('=')[1] for p in parts if p.startswith('split='))
         language = next(p.split('=')[1] for p in parts if p.startswith('language='))
-        
-        num_samples = len(table)
-        total_audio_size = sum(table['audio_size'].to_pylist())
+
+        # Ensure required columns exist and coerce types to avoid inconsistencies
+        if 'audio_size' not in df.columns:
+            print(f"⚠️  Skipping file with missing audio_size: {parquet_file}")
+            continue
+
+        # Cast text-like columns to Utf8 to avoid dictionary/encoding mismatches
+        for c in ('corpus', 'split', 'language', 'text'):
+            if c in df.columns:
+                try:
+                    df = df.with_columns(pl.col(c).cast(pl.Utf8))
+                except Exception:
+                    # ignore and continue; we only need audio_size for duration stats
+                    pass
+
+        num_samples = df.shape[0]
+        total_audio_size = int(df['audio_size'].sum())
         duration_hours = total_audio_size / 16_000 / 3600
-        
+
         stats.append({
             'corpus': corpus,
             'language': language,
@@ -242,7 +262,7 @@ def compute_dataset_statistics(dataset_path: str) -> Dict[str, Any]:
             'num_samples': num_samples,
             'duration_hours': duration_hours
         })
-        
+
         print(f"{corpus:15} | {language:15} | {split:10} | {num_samples:8,} samples | {duration_hours:8.2f} hours")
     
     return stats

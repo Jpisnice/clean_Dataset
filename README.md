@@ -35,6 +35,7 @@ This is a **gated dataset** that requires authentication:
 2. Click "Access repository" and accept the terms
 3. Get your token from https://huggingface.co/settings/tokens
 4. Copy the token (starts with `hf_`)
+cmd to run: uv run process_vaani.py ./output_data --hf-token hf_xxxxxxxxxxxxxxxxxxxxxxxxx --state Goa --max-samples 10 --use-ray
 
 ### 2. Test Text Cleaning
 

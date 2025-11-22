@@ -85,7 +85,7 @@ def process_vaani_konkani(
             dataset_name="ARTPARK-IISc/Vaani-transcription-part",
             dataset_config="Konkani",
             corpus_name="vaani",
-            language_code="kok_Deva",  # Konkani in Devanagari script
+            language_code="gom_Deva",  # Konkani in Devanagari script
             split=hf_split,
             filter_state=filter_state,
             max_samples=max_samples,
@@ -242,7 +242,26 @@ class VaaniDatasetPipeline(DatasetIngestionPipeline):
             print("Processing with Ray...")
             ray_dataset = ray.data.from_huggingface(dataset)
             ray_dataset = ray_dataset.map_batches(process_batch, batch_size=100)
-            processed_data = ray_dataset.to_arrow()
+            # Ray's Dataset API differs between versions. Some versions provide
+            # `to_arrow()` while others expose `to_pandas()` or different methods.
+            # Prefer `to_arrow()` when available; fall back to conversion via
+            # pandas -> pyarrow to ensure we consistently produce a pyarrow.Table
+            # which the downstream code expects.
+            if hasattr(ray_dataset, "to_arrow"):
+                processed_data = ray_dataset.to_arrow()
+            else:
+                # Convert to pandas DataFrame first, then to pyarrow Table.
+                # Keep preserve_index=False to avoid adding the pandas index.
+                try:
+                    import pandas as _pd
+
+                    df = ray_dataset.to_pandas()
+                    processed_data = pa.Table.from_pandas(df, preserve_index=False)
+                except Exception:
+                    # As a very last resort, attempt to collect as a list of
+                    # dictionaries and build an arrow table directly.
+                    collected = ray_dataset.take_all()
+                    processed_data = pa.Table.from_pylist(collected)
         else:
             print("Processing without Ray...")
             processed_data = dataset.map(
@@ -276,6 +295,34 @@ class VaaniDatasetPipeline(DatasetIngestionPipeline):
             print("⚠️  No valid samples after processing")
             return None
         
+        # Ensure stable string types for merging across splits
+        # Some backends may create dictionary-typed columns while others use plain
+        # string columns, which later causes pyarrow.Dataset merges to fail.
+        # Cast the key text columns to string explicitly so all parquet parts
+        # have a consistent schema.
+        for col_name in ("corpus", "split", "language", "text"):
+            if col_name in processed_data.column_names:
+                try:
+                    # Build a plain utf8 array from python values to avoid
+                    # dictionary-encoded types across different produced files.
+                    values = processed_data[col_name].to_pylist()
+                    utf8_arr = pa.array([None if v is None else str(v) for v in values], type=pa.string())
+                    col_idx = processed_data.schema.get_field_index(col_name)
+                    processed_data = processed_data.set_column(col_idx, col_name, utf8_arr)
+                except Exception:
+                    # If casting fails, attempt a fallback cast (best-effort)
+                    try:
+                        col_idx = processed_data.schema.get_field_index(col_name)
+                        processed_data = processed_data.set_column(
+                            col_idx,
+                            col_name,
+                            pa.compute.cast(processed_data[col_name], pa.string())
+                        )
+                    except Exception:
+                        # Give up silently — compute_dataset_statistics will
+                        # surface any remaining incompatibilities.
+                        pass
+
         # Create output directory
         from pathlib import Path
         output_path = (
@@ -290,12 +337,15 @@ class VaaniDatasetPipeline(DatasetIngestionPipeline):
         output_file = output_path / "part-0.parquet"
         print(f"Writing to: {output_file}")
         
+        # Avoid dictionary encoding at write-time to keep schema consistent
+        # across all produced parquet files (dictionary columns can differ
+        # per-file and break merges in pyarrow when combining parts).
         pq.write_table(
             processed_data,
             output_file,
             row_group_size=self.row_group_size,
             compression='zstd',
-            use_dictionary=True
+            use_dictionary=False
         )
         
         # Compute statistics
