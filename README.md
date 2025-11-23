@@ -197,6 +197,21 @@ This shows:
 - Total duration in hours
 - Breakdown by corpus and language
 
+## Test Audio Playback
+
+To verify the processed audio data, you can play individual samples:
+
+```bash
+uv run .\play_parquet_audio.py "output_data\version=0\corpus=vaani\split=train\language=gom_Deva\part-0.parquet" --row 0
+```
+
+This will:
+- Decode the audio from the specified row
+- Play it through your default audio output
+- Show the duration and sample rate
+
+**Note**: The script requires `sounddevice` for audio playback, which is automatically installed with the project dependencies.
+
 ## Project Structure
 
 ```

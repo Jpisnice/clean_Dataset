@@ -4,6 +4,7 @@ Based on omnilingual-asr pipeline.
 """
 
 import io
+import logging
 import numpy as np
 import pyarrow as pa
 import soundfile as sf
@@ -109,8 +110,40 @@ class AudioTableProcessor:
         Returns:
             Tuple of (compressed_bytes, audio_size)
         """
-        waveform = np.array(audio_dict['array'], dtype=np.float32)
-        sample_rate = audio_dict['sampling_rate']
+        # Handle multiple input formats that HuggingFace / Ray may provide
+        # Typical shapes:
+        #  - {'array': [...], 'sampling_rate': 16000}
+        #  - {'path': '/abs/path/to/file.wav'}
+        #  - {'bytes': b'...'} or raw bytes
+        #  - numpy array (assume sample rate provided separately is missing)
+
+        # Case: raw bytes (compressed audio)
+        if isinstance(audio_dict, (bytes, bytearray)):
+            audio_io = io.BytesIO(audio_dict)
+            waveform, sample_rate = sf.read(audio_io, dtype='float32')
+        # Case: dict-like
+        elif isinstance(audio_dict, dict):
+            if 'array' in audio_dict and 'sampling_rate' in audio_dict:
+                waveform = np.array(audio_dict['array'], dtype=np.float32)
+                sample_rate = int(audio_dict['sampling_rate'])
+            elif 'bytes' in audio_dict:
+                audio_io = io.BytesIO(audio_dict['bytes'])
+                waveform, sample_rate = sf.read(audio_io, dtype='float32')
+            elif 'path' in audio_dict and audio_dict['path']:
+                waveform, sample_rate = sf.read(str(audio_dict['path']), dtype='float32')
+            else:
+                # Try to be permissive: maybe the dict contains numpy types
+                try:
+                    waveform = np.array(audio_dict)  # will fail for mapping-types
+                    sample_rate = self.target_sample_rate
+                except Exception as e:
+                    raise ValueError(f"Unrecognized audio input format: keys={list(audio_dict.keys())}") from e
+        # Case: numpy array given directly - assume target sample rate
+        elif isinstance(audio_dict, np.ndarray):
+            waveform = np.array(audio_dict, dtype=np.float32)
+            sample_rate = self.target_sample_rate
+        else:
+            raise ValueError(f"Unsupported audio input type: {type(audio_dict)}")
         
         # Convert stereo to mono if needed
         if len(waveform.shape) > 1:
@@ -165,7 +198,10 @@ class AudioTableProcessor:
                 audio_bytes_list.append(audio_bytes)
                 audio_size_list.append(audio_size)
             except Exception as e:
-                print(f"Error processing audio: {e}")
+                # Use logging to ensure messages are properly handled by the
+                # environment; keep fallback behavior of empty audio when a
+                # sample fails to process.
+                logging.exception("Error processing audio: %s", e)
                 # Use empty audio as fallback
                 audio_bytes_list.append(b"")
                 audio_size_list.append(0)
