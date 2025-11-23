@@ -419,6 +419,15 @@ Examples:
     
     args = parser.parse_args()
     
+    # Make stdout/stderr UTF-8 so emoji/logging messages don't fail on Windows
+    try:
+        import sys
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        import os
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
     if args.test_cleaning:
         test_text_cleaning()
     else:

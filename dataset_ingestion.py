@@ -270,6 +270,17 @@ def compute_dataset_statistics(dataset_path: str) -> Dict[str, Any]:
 
 def main():
     """Main entry point with CLI."""
+    # Ensure console I/O uses UTF-8 on Windows to avoid UnicodeEncodeErrors
+    # when writing messages containing emojis or non-CP1252 characters.
+    import sys
+    try:
+        # Python 3.7+ supports reconfigure on TextIOWrapper
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        # Fallback: set environment variable (used on subprocesses)
+        import os
+        os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
     parser = argparse.ArgumentParser(description="ASR Dataset Ingestion Pipeline")
     
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
